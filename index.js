@@ -1,11 +1,29 @@
 const express = require('express');
+const axios = require('axios');
 const app = express();
 app.use(express.json());
 
+// --- CONFIGURACIÓN ---
 const ADMIN_PHONE = '593997767840';
-let baseDeConocimiento = { leads: {}, configPendiente: null };
+const VERIFY_TOKEN = 'mi_clave_secreta_123'; // Clave exacta solicitada
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN; 
+const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-// --- ENDPOINT WEBHOOK ---
+// --- 1. VERIFICACIÓN DEL WEBHOOK ---
+app.get('/webhook', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+        console.log('Webhook verificado exitosamente con la clave: ' + VERIFY_TOKEN);
+        res.status(200).send(challenge);
+    } else {
+        res.status(403).send('Token de verificación incorrecto');
+    }
+});
+
+// --- 2. RECEPCIÓN DE MENSAJES ---
 app.post('/webhook', async (req, res) => {
     const entry = req.body.entry?.[0]?.changes?.[0]?.value;
     if (!entry?.messages) return res.sendStatus(200);
@@ -15,69 +33,61 @@ app.post('/webhook', async (req, res) => {
     const type = msg.type;
     const text = type === 'text' ? msg.text.body : "";
 
-    // 1. MANEJO DE VOZ (Seguridad y Calidad)
+    // Gestión de voz
     if (type === 'voice') {
-        enviarRespuesta(from, "Hola, gracias por su mensaje. Por políticas de calidad y para registrar correctamente su solicitud en nuestro sistema, ¿sería tan amable de escribirme brevemente lo que necesita? Así le ayudo de inmediato.");
+        await enviarRespuesta(from, "Hola, gracias por su mensaje. Por políticas de calidad y para registrar correctamente su solicitud en nuestro sistema, ¿sería tan amable de escribirme brevemente lo que necesita? Así le ayudo de inmediato.");
         return res.sendStatus(200);
     }
 
-    // 2. COMANDOS DE ADMINISTRADOR
+    // Comandos Admin
     if (from === ADMIN_PHONE) {
         if (text.startsWith('[SYS_CONFIG]')) {
             baseDeConocimiento.configPendiente = text.replace('[SYS_CONFIG]', '').trim();
-            enviarRespuesta(from, "Nueva configuración recibida. ¿Confirma que desea aplicarla? (Responda: CONFIRMAR)");
+            await enviarRespuesta(from, "Nueva configuración recibida. ¿Confirma que desea aplicarla? (Responda: CONFIRMAR)");
             return res.sendStatus(200);
         }
-        if (text === 'CONFIRMAR' && baseDeConocimiento.configPendiente) {
-            console.log("Sistema actualizado:", baseDeConocimiento.configPendiente);
+        if (text.trim().toUpperCase() === 'CONFIRMAR' && baseDeConocimiento.configPendiente) {
             baseDeConocimiento.configPendiente = null;
-            enviarRespuesta(from, "Protocolo cargado. Esperando interacción.");
-            return res.sendStatus(200);
-        }
-        if (text.startsWith('/resumen')) {
-            generarReporte(from, text.split(' ')[1]);
+            await enviarRespuesta(from, "Protocolo cargado. Esperando interacción.");
             return res.sendStatus(200);
         }
     }
 
-    // 3. LÓGICA DE ATENCIÓN (Máquina de Estados)
     atenderCliente(from, text);
     res.sendStatus(200);
 });
 
-function atenderCliente(phone, text) {
-    let lead = baseDeConocimiento.leads[phone] || { score: 0, etapa: 'saludo', data: {} };
+// --- LÓGICA DE ATENCIÓN ---
+let baseDeConocimiento = { leads: {}, configPendiente: null };
 
-    // Lógica consultiva gradual
+async function atenderCliente(phone, text) {
+    let lead = baseDeConocimiento.leads[phone] || { score: 0, etapa: 'saludo', data: {} };
     if (lead.etapa === 'saludo') {
-        enviarRespuesta(phone, "¿Qué servicio o solución buscaba consultar hoy?");
+        await enviarRespuesta(phone, "¿Qué servicio o solución buscaba consultar hoy?");
         lead.etapa = 'indagacion';
     } else {
-        // Calificación invisible + Indagación natural
-        lead.score += 10; 
+        lead.score += 10;
         if (!lead.data.nombre) {
             lead.data.nombre = text;
-            enviarRespuesta(phone, "Perfecto, ¿en qué ciudad o sector se encuentra?");
+            await enviarRespuesta(phone, "Entendido. ¿Podría indicarme en qué ciudad o sector se encuentra?");
         } else if (!lead.data.ubicacion) {
             lead.data.ubicacion = text;
-            enviarRespuesta(phone, "Entendido. ¿Me indica el producto o servicio específico que requiere?");
+            await enviarRespuesta(phone, "Excelente. ¿En qué producto o servicio específico estaba interesado?");
         }
-        // ... (Aquí se extendería a los niveles 2 y 3)
     }
-
     baseDeConocimiento.leads[phone] = lead;
-    if (lead.score > 80) enviarReporte(ADMIN_PHONE, lead);
 }
 
-// --- FUNCIONES AUXILIARES ---
-function enviarRespuesta(to, mensaje) {
-    // Aquí insertarías tu llamada a la API de Meta (axios.post...)
-    console.log(`Enviando a ${to}: ${mensaje}`);
+async function enviarRespuesta(to, mensaje) {
+    try {
+        await axios({
+            method: 'POST',
+            url: `https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/messages`,
+            headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+            data: { messaging_product: "whatsapp", to: to, type: "text", text: { body: mensaje } }
+        });
+    } catch (e) { console.error("Error al enviar:", e.response?.data || e.message); }
 }
 
-function generarReporte(admin, nombre) {
-    // Lógica de resumen solicitada
-    console.log(`Reporte generado para ${nombre}`);
-}
-
-app.listen(process.env.PORT || 3000, () => console.log('Bot activo.'));
+const port = process.env.PORT || 10000;
+app.listen(port, () => console.log(`Servidor activo en puerto ${port}`));
